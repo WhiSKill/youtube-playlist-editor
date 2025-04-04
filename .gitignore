@@ -172,3 +172,9 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Ignore common Python files, environment files, and sensitive credential files.
+client_secrets.json
+token.pickle
+# Cursor AI chats
+.specstory/
