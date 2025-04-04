@@ -176,5 +176,6 @@ cython_debug/
 # Ignore common Python files, environment files, and sensitive credential files.
 client_secrets.json
 token.pickle
+.env
 # Cursor AI chats
 .specstory/
