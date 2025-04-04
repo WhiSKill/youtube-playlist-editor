@@ -20,8 +20,14 @@ SCOPES = ["https://www.googleapis.com/auth/youtube"]
 
 
 def get_authenticated_service() -> Optional[Resource]:
-    """Authenticate with YouTube API and return the service resource."""
-    credentials = None
+    """Authenticates with the YouTube API using OAuth 2.0.
+
+    Handles token loading, refreshing, and the initial OAuth flow.
+
+    Returns:
+        Optional[Resource]: An authenticated YouTube API service object, or None if authentication fails.
+    """
+    credentials = None # Initialize credentials to None
     # Determine paths relative to the project root or a defined config location
     # For simplicity now, assuming they are in the root where the script might be invoked from
     # Or, more robustly, define them relative to this file's location if structure is fixed
@@ -35,66 +41,103 @@ def get_authenticated_service() -> Optional[Resource]:
         click.echo(f"Error: {CLIENT_SECRETS_FILE} not found. Please download it from Google Cloud Console and place it in the project root directory ({base_path.resolve()}).", err=True)
         sys.exit(1)
 
-    # Load existing credentials if available
+    # Attempt to load existing credentials
     if token_path.exists():
         try:
             with open(token_path, "rb") as token_file:
-                credentials = pickle.load(token_file)
+                loaded_creds = pickle.load(token_file)
             logging.info(f"Loaded credentials from {token_path}")
-        except Exception as e:
-            logging.warning(f"Could not load token file ({token_path}): {e}. Re-authenticating.")
-            credentials = None # Force re-authentication
 
-    # If no valid credentials, initiate OAuth flow
-    if not credentials or not credentials.valid:
-        if credentials and credentials.expired and credentials.refresh_token:
-            try:
-                logging.info("Credentials expired, refreshing...")
-                credentials.refresh(Request())
-            except Exception as e:
-                logging.warning(f"Failed to refresh token: {e}. Re-authenticating.")
-                # If refresh fails, force re-authentication by deleting token
-                if token_path.exists():
+            # Check validity and expiry *after* loading
+            if loaded_creds and loaded_creds.valid:
+                credentials = loaded_creds # Use valid credentials
+
+            elif loaded_creds and loaded_creds.expired and loaded_creds.refresh_token:
+                try:
+                    logging.info("Credentials expired, refreshing...")
+                    loaded_creds.refresh(Request())
+                    credentials = loaded_creds # Use refreshed credentials
+                    # Save refreshed token immediately
                     try:
-                        token_path.unlink()
-                        logging.info(f"Removed invalid token file: {token_path}")
-                    except OSError as unlink_e:
-                        logging.error(f"Error removing token file {token_path}: {unlink_e}")
-                credentials = None # Ensure re-authentication flow starts
-        else:
-            if not credentials: # Only log this if we didn't try to refresh
-                 logging.info("No valid credentials found, starting authentication flow.")
-            try:
-                flow = InstalledAppFlow.from_client_secrets_file(str(secrets_path), SCOPES)
-                # Run local server flow opens a browser window for user authorization
-                credentials = flow.run_local_server(port=0)
-            except FileNotFoundError:
-                 # This specific error is already checked above, but good to be explicit
-                 logging.error(f"Critical: {CLIENT_SECRETS_FILE} not found during flow creation at {secrets_path}")
-                 click.echo(f"Error: {CLIENT_SECRETS_FILE} not found at expected location: {secrets_path.resolve()}", err=True)
-                 sys.exit(1)
-            except Exception as e:
-                logging.error(f"Authentication flow failed: {e}")
-                click.echo(f"Error during authentication: {e}", err=True)
-                return None
+                        with open(token_path, "wb") as token_file:
+                            pickle.dump(credentials, token_file)
+                        logging.info(f"Refreshed credentials saved to {token_path}")
+                    except Exception as save_e:
+                        logging.error(f"Failed to save refreshed token to {token_path}: {save_e}")
+                        click.echo(f"Warning: Could not save refreshed credentials to {token_path}: {save_e}", err=True)
+                        # Continue with refreshed creds even if save fails
 
-        # Save the credentials for the next run
+                except Exception as refresh_e:
+                    logging.warning(f"Failed to refresh token: {refresh_e}. Re-authenticating by removing token.")
+                    # If refresh fails, delete token file and ensure credentials remains None
+                    if token_path.exists(): # Check again before unlinking
+                        try:
+                            token_path.unlink()
+                            logging.info(f"Removed invalid token file: {token_path}")
+                        except OSError as unlink_e:
+                            logging.error(f"Error removing token file {token_path}: {unlink_e}")
+                    credentials = None # Explicitly ensure it's None for the next check
+
+            else:
+                 # Token file existed but creds were invalid/not refreshable
+                 logging.warning(f"Invalid or non-refreshable credentials found in {token_path}. Re-authenticating.")
+                 # No need to delete token here, flow will overwrite it
+                 credentials = None
+
+        except Exception as load_e:
+            logging.warning(f"Could not load token file ({token_path}): {load_e}. Re-authenticating.")
+            credentials = None # Ensure re-authentication on load failure
+
+    # If credentials are still None after trying to load/refresh, start flow
+    if credentials is None:
+        logging.info("No valid credentials available, starting authentication flow.")
         try:
-            with open(token_path, "wb") as token_file:
-                pickle.dump(credentials, token_file)
-            logging.info(f"Credentials saved to {token_path}")
-        except Exception as e:
-             logging.error(f"Failed to save token to {token_path}: {e}")
-             click.echo(f"Warning: Could not save credentials to {token_path}: {e}", err=True)
+            flow = InstalledAppFlow.from_client_secrets_file(str(secrets_path), SCOPES)
+            # Run local server flow opens a browser window for user authorization
+            credentials = flow.run_local_server(port=0) # This might be None if flow fails internally? No, usually raises.
+            if not credentials:
+                 # Should not happen with run_local_server unless user cancels early?
+                 logging.error("Authentication flow did not return credentials.")
+                 click.echo("Authentication cancelled or failed.", err=True)
+                 return None
 
-    # Build the YouTube API service
+            # Save the new credentials immediately after successful flow
+            try:
+                with open(token_path, "wb") as token_file:
+                    pickle.dump(credentials, token_file)
+                logging.info(f"New credentials saved to {token_path}")
+            except Exception as e:
+                 logging.error(f"Failed to save new token to {token_path}: {e}")
+                 click.echo(f"Warning: Could not save new credentials to {token_path}: {e}", err=True)
+                 # Proceed with credentials even if save fails
+
+        except FileNotFoundError:
+             # This specific error is already checked above, but good to be explicit
+             logging.error(f"Critical: {CLIENT_SECRETS_FILE} not found during flow creation at {secrets_path}")
+             click.echo(f"Error: {CLIENT_SECRETS_FILE} not found at expected location: {secrets_path.resolve()}", err=True)
+             sys.exit(1) # Exit if secrets file missing during flow
+        except Exception as e:
+            logging.error(f"Authentication flow failed: {e}", exc_info=True) # Log traceback
+            click.echo(f"Error during authentication: {e}", err=True)
+            return None # Exit if flow fails for other reasons
+
+    # --- Build Service ---
+    # At this point, credentials should be valid (loaded, refreshed, or from new flow)
+    # OR None only if the authentication flow itself failed explicitly and returned None above.
+    if not credentials:
+         # This case should ideally only be hit if flow failed and returned None above
+         logging.error("Cannot build service, authentication failed.")
+         return None
+
     try:
-        return build(API_SERVICE_NAME, API_VERSION, credentials=credentials)
+        service = build(API_SERVICE_NAME, API_VERSION, credentials=credentials)
+        logging.info(f"Successfully built YouTube {API_VERSION} service.")
+        return service
     except HttpError as e:
         logging.error(f"Failed to build YouTube service: {e}")
         click.echo(f"Error building YouTube service: {e}", err=True)
         return None
     except Exception as e:
-        logging.error(f"An unexpected error occurred building YouTube service: {e}")
+        logging.error(f"An unexpected error occurred building YouTube service: {e}", exc_info=True) # Log traceback
         click.echo(f"An unexpected error occurred: {e}", err=True)
         return None 
