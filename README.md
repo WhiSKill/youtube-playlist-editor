@@ -8,8 +8,9 @@ A CLI tool to add YouTube videos listed in a file to a specified YouTube playlis
 *   Authenticates with the YouTube Data API v3 using OAuth 2.0 (browser-based flow on first run).
 *   Stores credentials securely for subsequent runs (in `token.pickle`, which is gitignored).
 *   Adds the videos to a specified YouTube playlist.
+*   **Checks for duplicates:** Skips adding videos that are already present in the target playlist.
 *   Handles common URL formats (watch, youtu.be, embed, shorts, live).
-*   Provides logging and a summary of operations.
+*   Provides logging and a summary of operations (including skipped duplicates).
 
 ## Setup
 
@@ -93,6 +94,7 @@ Follow these steps carefully to set up the tool:
 
 3.  **Subsequent Runs:**
     On future runs, the script will use the saved `token.pickle` and directly proceed to add videos without requiring browser authentication.
+    *   **Note on Duplicates:** The script first checks the existing videos in the playlist. Any videos from your input file that are already in the playlist will be logged and skipped. The final summary will indicate how many duplicates were skipped.
 
 ## Development
 

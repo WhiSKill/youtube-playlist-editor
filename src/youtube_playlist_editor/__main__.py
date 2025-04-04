@@ -117,6 +117,64 @@ def extract_video_id(url: str) -> Optional[str]:
 
 # --- Playlist Management ---
 
+def get_existing_playlist_video_ids(youtube: Resource, playlist_id: str) -> set[str]:
+    """Fetches all video IDs currently in the specified playlist."""
+    existing_ids = set()
+    next_page_token = None
+    retries = 3 # Simple retry mechanism for potential transient issues
+    attempt = 0
+
+    logging.info(f"Fetching existing video IDs from playlist '{playlist_id}'...")
+
+    while attempt < retries:
+        try:
+            while True:
+                request = youtube.playlistItems().list(
+                    part="snippet",
+                    playlistId=playlist_id,
+                    maxResults=50, # Max allowed by API
+                    pageToken=next_page_token
+                )
+                response = request.execute()
+
+                for item in response.get("items", []):
+                    video_id = item.get("snippet", {}).get("resourceId", {}).get("videoId")
+                    if video_id:
+                        existing_ids.add(video_id)
+
+                next_page_token = response.get("nextPageToken")
+                if not next_page_token:
+                    break # Exit inner loop if no more pages
+            # If we successfully break the inner loop, break the outer retry loop
+            break
+        except HttpError as e:
+            attempt += 1
+            logging.warning(f"Attempt {attempt}/{retries}: API Error fetching existing playlist items: {e}")
+            if e.resp.status == 404: # Playlist genuinely not found during fetch
+                logging.error(f"Playlist '{playlist_id}' not found while fetching existing items.")
+                click.echo(f"Error: Playlist ID '{playlist_id}' seems to have become inaccessible after the initial check.", err=True)
+                # Reset existing_ids as we cannot trust partial results
+                return set()
+            if attempt >= retries:
+                logging.error(f"Failed to fetch existing playlist items after {retries} attempts.")
+                click.echo(f"Error: Failed to retrieve existing videos from playlist '{playlist_id}' due to API errors.", err=True)
+                # Consider exiting or returning empty set based on desired robustness
+                # Returning empty set means duplicates won't be checked if fetch fails
+                return set()
+            # Wait a bit before retrying (optional)
+            # time.sleep(1)
+        except Exception as e:
+             attempt += 1
+             logging.warning(f"Attempt {attempt}/{retries}: Unexpected error fetching existing playlist items: {e}")
+             if attempt >= retries:
+                logging.error(f"Failed to fetch existing playlist items after {retries} attempts due to unexpected error: {e}")
+                click.echo(f"Error: An unexpected error occurred retrieving existing videos from playlist '{playlist_id}'.", err=True)
+                return set()
+
+
+    logging.info(f"Found {len(existing_ids)} existing video IDs in the playlist.")
+    return existing_ids
+
 def add_video_to_playlist(youtube: Resource, playlist_id: str, video_id: str) -> bool:
     """Adds a single video to the specified playlist."""
     try:
@@ -208,8 +266,14 @@ def add(file: Path, playlist_id: str):
         sys.exit(1)
     # --- End Playlist ID Validity Check ---
 
+    # --- Fetch Existing Video IDs for Deduplication ---
+    existing_video_ids = get_existing_playlist_video_ids(youtube, playlist_id)
+
+    # --- End Fetch Existing Video IDs ---
+
     added_count = 0
     skipped_count = 0
+    duplicate_count = 0 # New counter for duplicates
     error_count = 0
     line_num = 0
 
@@ -222,9 +286,18 @@ def add(file: Path, playlist_id: str):
 
                 video_id = extract_video_id(url)
                 if video_id:
+                    # --- Check for Duplicates ---
+                    if video_id in existing_video_ids:
+                        logging.info(f"Skipping duplicate video ID: {video_id} (already in playlist)")
+                        duplicate_count += 1
+                        continue # Move to the next line
+                    # --- End Check for Duplicates ---
+
                     logging.info(f"Attempting to add video ID: {video_id} from URL: {url}")
                     if add_video_to_playlist(youtube, playlist_id, video_id):
                         added_count += 1
+                        # Optionally add successfully added ID to the set to prevent adding duplicates from the *same file*
+                        # existing_video_ids.add(video_id)
                     else:
                         # Error logging is handled within add_video_to_playlist
                         error_count += 1
@@ -245,6 +318,7 @@ def add(file: Path, playlist_id: str):
     click.echo("\n--- Summary ---")
     click.echo(f"Successfully added: {added_count} videos.")
     click.echo(f"Skipped (invalid URL/ID): {skipped_count} lines.")
+    click.echo(f"Skipped (duplicate): {duplicate_count} videos.") # Added duplicate info
     click.echo(f"Errors during addition: {error_count} videos.")
 
     # Check if the last API call failed due to playlist not found (error_count > 0)
